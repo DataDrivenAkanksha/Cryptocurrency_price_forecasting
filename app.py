@@ -12,13 +12,13 @@ warnings.filterwarnings("ignore")
 # Page Setup
 # ------------------------------
 st.set_page_config(page_title="BTC Price Prediction", layout="wide")
-st.title("💹 Bitcoin Price Prediction on Recent Data (2018-2025)")
+st.title("💹 Bitcoin Price Prediction on Recent Data (2022-2025)")
 
 # ------------------------------
 # Fetch BTC Data (2014-2018)
 # ------------------------------
 @st.cache_data
-def load_btc_data(ticker="BTC-USD", start="2018-01-01", end="2025-10-31"):
+def load_btc_data(ticker="BTC-USD", start="2022-01-01", end="2025-10-31"):
     btc = yf.Ticker(ticker)
     df = btc.history(start=start, end=end)
     if df.empty:
@@ -129,4 +129,5 @@ ax.legend()
 st.pyplot(fig)
 
 st.success("✅ Prediction complete on last 20% of BTC data.")
+
 
