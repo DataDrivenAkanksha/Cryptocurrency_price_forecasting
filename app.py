@@ -2,106 +2,79 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import pickle
-import tempfile
+import joblib
 from tensorflow.keras.models import load_model
-from sklearn.preprocessing import MinMaxScaler
+import yfinance as yf
 import warnings
 warnings.filterwarnings("ignore")
 
 # ------------------------------
 # Page Setup
 # ------------------------------
-st.set_page_config(page_title="BTC Price Forecasting", layout="wide")
-st.title("💹 Bitcoin Price Forecasting (Upload CSV)")
+st.set_page_config(page_title="BTC Price Prediction", layout="wide")
+st.title("💹 Bitcoin Price Prediction on Recent Data (2018-2025)")
 
 # ------------------------------
-# Sidebar: Forecast Days
-# ------------------------------
-forecast_days = st.sidebar.slider("Days to Forecast", 1, 30, 7)
-
-# ------------------------------
-# Upload CSV
-# ------------------------------
-st.sidebar.subheader("Upload Kaggle Cryptocurrency CSV")
-csv_file = st.sidebar.file_uploader("Upload CSV", type=["csv"])
-
-if csv_file is None:
-    st.warning("Please upload the cryptocurrency CSV to continue.")
-    st.stop()
-
-# ------------------------------
-# Load and Filter BTC Data
+# Fetch BTC Data (2014-2018)
 # ------------------------------
 @st.cache_data
-def load_data(file):
-    df = pd.read_csv(file, parse_dates=["Date"])
-    btc = df[df["Symbol"] == "BTC"].sort_values("Date").reset_index(drop=True)
-    return btc
+def load_btc_data(ticker="BTC-USD", start="2014-01-01", end="2025-10-31"):
+    btc = yf.Ticker(ticker)
+    df = btc.history(start=start, end=end)
+    if df.empty:
+        return None
+    df = df.reset_index()
+    if 'Close' not in df.columns:
+        if 'close' in df.columns:
+            df.rename(columns={'close':'Close'}, inplace=True)
+        else:
+            return None
+    df = df[['Date','Close']].dropna()
+    return df
 
-df_btc = load_data(csv_file)
-
-if df_btc.empty:
-    st.error("No BTC data found in the CSV.")
+df_btc = load_btc_data()
+if df_btc is None or df_btc.empty:
+    st.error("No BTC data available for the specified period.")
     st.stop()
 
-st.subheader("📊 Historical BTC Data")
+st.subheader("📊 BTC Historical Data (2014-2025)")
 st.dataframe(df_btc.tail())
 
 # ------------------------------
-# Plot Historical Closing Price
+# Load LSTM Model and Scaler
 # ------------------------------
-st.subheader("📈 Historical BTC Closing Price")
-fig, ax = plt.subplots()
-ax.plot(df_btc['Date'], df_btc['Close'], label="Close Price", color="blue")
-ax.set_xlabel("Date")
-ax.set_ylabel("Price (USD)")
-ax.legend()
-st.pyplot(fig)
-
-# ------------------------------
-# Upload Model & Scaler
-# ------------------------------
-st.subheader("🧠 Upload Pre-Trained Model (.keras/.h5) and Scaler (.pkl)")
-model_file = st.file_uploader("Model (.keras or .h5)", type=['keras', 'h5'])
-scaler_file = st.file_uploader("Scaler (.pkl)", type=['pkl'])
-
-if model_file is None or scaler_file is None:
-    st.warning("Please upload both model and scaler files.")
-    st.stop()
-
-# Save uploaded files temporarily
-with tempfile.NamedTemporaryFile(delete=False, suffix=".keras") as tmp_model:
-    tmp_model.write(model_file.getbuffer())
-    tmp_model_path = tmp_model.name
-
-with tempfile.NamedTemporaryFile(delete=False, suffix=".pkl") as tmp_scaler:
-    tmp_scaler.write(scaler_file.getbuffer())
-    tmp_scaler_path = tmp_scaler.name
-
-# Load model and scaler
+st.subheader("🧠 Loading LSTM Model and Scaler from folder")
 try:
-    model = load_model(tmp_model_path, compile=False)
+    model = load_model("lstm_model_new.h5")
+    st.success("✅ LSTM model loaded successfully!")
 except Exception as e:
-    st.error(f"Error loading model: {e}")
+    st.error(f"Error loading LSTM model: {e}")
     st.stop()
 
-with open(tmp_scaler_path, "rb") as f:
-    scaler = pickle.load(f)
-
-st.success("✅ Model and scaler loaded successfully!")
+try:
+    scaler = joblib.load("scaler.pkl")
+    st.success("✅ Scaler loaded successfully!")
+except Exception as e:
+    st.error(f"Error loading scaler: {e}")
+    st.stop()
 
 # ------------------------------
-# Data Preparation: Log + Scaling
+# Data Preparation: Log + Scale
 # ------------------------------
-df_btc['Log_Close'] = np.log1p(df_btc['Close'])
-scaled_data = scaler.transform(df_btc[['Log_Close']])
+df_btc['Log_Close'] = np.log(df_btc['Close'])
+log_close = df_btc['Log_Close'].values.reshape(-1,1)
+scaled_data = scaler.transform(log_close)
 
-# Train-Test Split (80-20)
-train_size = int(len(scaled_data) * 0.8)
-train_data = scaled_data[:train_size]
-test_data = scaled_data[train_size:]
+# ------------------------------
+# Train-Test Split (80%-20%)
+# ------------------------------
+split_idx = int(len(scaled_data) * 0.2)
+train_data = scaled_data[:split_idx]
+test_data = scaled_data[split_idx:]
 
+# ------------------------------
+# Create Rolling Windows
+# ------------------------------
 def create_rolling(dataset, look_back=60):
     X, y = [], []
     for i in range(look_back, len(dataset)):
@@ -113,40 +86,46 @@ look_back = 60
 X_train, y_train = create_rolling(train_data, look_back)
 X_test, y_test = create_rolling(test_data, look_back)
 
+# Reshape for LSTM input
 X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
-X_test = X_test.reshape((X_test.shape[0], X_test.shape[1], 1))
+X_test  = X_test.reshape((X_test.shape[0], X_test.shape[1], 1))
 
 # ------------------------------
-# Rolling Forecast
+# Predict on Test Set
 # ------------------------------
-st.subheader("🔮 Forecasted BTC Prices")
-last_60 = scaled_data[-look_back:]
-forecast_input = last_60.reshape(1, look_back, 1)
-forecast_scaled = []
+y_pred_scaled = model.predict(X_test, verbose=0)
+y_pred_log = scaler.inverse_transform(y_pred_scaled)
+y_pred_prices = np.exp(y_pred_log)
 
-for _ in range(forecast_days):
-    pred = model.predict(forecast_input, verbose=0)
-    forecast_scaled.append(pred[0,0])
-    forecast_input = np.append(forecast_input[:,1:,:], [[pred]], axis=1)
+# Actual test prices
+y_test_log = scaler.inverse_transform(y_test.reshape(-1,1))
+y_test_prices = np.exp(y_test_log)
 
-forecast_scaled = np.array(forecast_scaled).reshape(-1,1)
-forecast_log = scaler.inverse_transform(forecast_scaled)
-forecast_prices = np.expm1(forecast_log)
-
-future_dates = pd.date_range(df_btc['Date'].iloc[-1], periods=forecast_days+1, freq='D')[1:]
-forecast_df = pd.DataFrame({'Date': future_dates, 'Predicted Price': forecast_prices.flatten()})
-
-st.dataframe(forecast_df.style.format({'Predicted Price':'{:.2f}'}))
+# Dates for test set
+test_dates = df_btc['Date'].iloc[split_idx + look_back:].reset_index(drop=True)
 
 # ------------------------------
-# Plot Historical + Forecast
+# Display Test Predictions
 # ------------------------------
-fig2, ax2 = plt.subplots()
-ax2.plot(df_btc['Date'], df_btc['Close'], label="Historical", color="blue")
-ax2.plot(forecast_df['Date'], forecast_df['Predicted Price'], label="Predicted", color="orange")
-ax2.set_xlabel("Date")
-ax2.set_ylabel("Price (USD)")
-ax2.legend()
-st.pyplot(fig2)
+forecast_df = pd.DataFrame({
+    'Date': test_dates,
+    'Actual Price': y_test_prices.flatten(),
+    'Predicted Price': y_pred_prices.flatten()
+})
 
-st.success(f"✅ Forecast complete for {forecast_days} days of BTC prices.")
+st.subheader("📈 BTC Prediction vs Actual (Recent Data)")
+st.dataframe(forecast_df.style.format({'Actual Price':'{:.2f}','Predicted Price':'{:.2f}'}))
+
+# ------------------------------
+# Plot Actual vs Predicted
+# ------------------------------
+fig, ax = plt.subplots(figsize=(12,5))
+ax.plot(test_dates, y_test_prices, label="Actual Price", color="blue")
+ax.plot(test_dates, y_pred_prices, label="Predicted Price", color="orange")
+ax.set_xlabel("Date")
+ax.set_ylabel("Price (USD)")
+ax.set_title("BTC Price Prediction on Test Set")
+ax.legend()
+st.pyplot(fig)
+
+st.success("✅ Prediction complete on last 20% of BTC data.")
