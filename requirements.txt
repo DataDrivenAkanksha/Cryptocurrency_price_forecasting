@@ -8,3 +8,5 @@ matplotlib==3.9.2
 plotly==5.24.1
 yfinance==0.2.44
 seaborn==0.13.2
+python_version < "3.12"
+
